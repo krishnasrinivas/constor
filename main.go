@@ -9,9 +9,10 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+	"strconv"
 
 	"github.com/hanwen/go-fuse/fuse"
-	// "github.com/VividCortex/godaemon"
+	"github.com/VividCortex/godaemon"
 )
 
 const INOXATTR = "trusted.constor.ino"
@@ -19,7 +20,7 @@ const DELXATTR = "trusted.constor.deleted"
 
 
 func (constor *Constor) Lookup(header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
-	Debug("%d %s", header.NodeId, name)
+	constor.log("%d %s", header.NodeId, name)
 	var stat syscall.Stat_t
 	parent, err := constor.inodemap.findInode(header.NodeId)
 	if err != nil {
@@ -62,26 +63,26 @@ func (constor *Constor) Lookup(header *fuse.InHeader, name string, out *fuse.Ent
 	attr.FromStat(&stat)
 	out.NodeId = attr.Ino
 	out.Ino = attr.Ino
-	Debug("%d", out.Ino)
+	constor.log("%d", out.Ino)
 	return fuse.OK
 }
 
 func (constor *Constor) Forget(nodeID uint64, nlookup uint64) {
-	Debug("%d %d", nodeID, nlookup)
+	constor.log("%d %d", nodeID, nlookup)
 	if inode, err := constor.inodemap.findInode(nodeID); err != nil {
 		inode.forget(nlookup)
 	}
 }
 
 func (constor *Constor) GetAttr(input *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
-	Debug("%d", input.NodeId)
+	constor.log("%d", input.NodeId)
 	ino := input.NodeId
 	stat := syscall.Stat_t{}
 	path, err := constor.dentrymap.getPath(ino)
 	if err != nil {
 		return fuse.ToStatus(err)
 	}
-	Debug("%s", path)
+	constor.log("%s", path)
 	inode, err := constor.inodemap.findInode(ino)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -94,12 +95,12 @@ func (constor *Constor) GetAttr(input *fuse.GetAttrIn, out *fuse.AttrOut) (code 
 	if ino == 1 {
 		attr.Ino = 1
 	}
-	Debug("%d", attr.Ino)
+	constor.log("%d", attr.Ino)
 	return fuse.OK
 }
 
 func (constor *Constor) OpenDir(input *fuse.OpenIn, out *fuse.OpenOut) (code fuse.Status) {
-	Debug("%d", input.NodeId)
+	constor.log("%d", input.NodeId)
 	path, err := constor.dentrymap.getPath(input.NodeId)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -181,7 +182,7 @@ func (constor *Constor) OpenDir(input *fuse.OpenIn, out *fuse.OpenOut) (code fus
 }
 
 func (constor *Constor) ReadDir(input *fuse.ReadIn, fuseout *fuse.DirEntryList) fuse.Status {
-	Debug("%d", input.Offset)
+	constor.log("%d", input.Offset)
 	ptr := uintptr(input.Fh)
 	offset := input.Offset
 	out := (*DirEntryList)(unsafe.Pointer(fuseout))
@@ -209,7 +210,7 @@ func (constor *Constor) ReadDir(input *fuse.ReadIn, fuseout *fuse.DirEntryList) 
 }
 
 func (constor *Constor) ReleaseDir(input *fuse.ReleaseIn) {
-	Debug("")
+	constor.log("")
 	ptr := uintptr(input.Fh)
 	constor.deletefd(ptr)
 }
@@ -225,7 +226,7 @@ func (constor *Constor) SetDebug(dbg bool) {
 }
 
 func (constor *Constor) StatFs(header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
-	Debug("%d", header.NodeId)
+	constor.log("%d", header.NodeId)
 	path := constor.layers[0]
 	s := syscall.Statfs_t{}
 	err := syscall.Statfs(path, &s)
@@ -245,7 +246,7 @@ func (constor *Constor) StatFs(header *fuse.InHeader, out *fuse.StatfsOut) fuse.
 }
 
 func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.Status {
-	Debug("%d %d", input.NodeId, input.Valid)
+	constor.log("%d %d", input.NodeId, input.Valid)
 	var err error
 	uid := -1
 	gid := -1
@@ -257,7 +258,7 @@ func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.S
 	if inode.layer != 0 {
 		err = constor.copyup(inode)
 		if err != nil {
-			Debug("%s", err)
+			constor.log("%s", err)
 			return fuse.ToStatus(err)
 		}
 	}
@@ -265,7 +266,7 @@ func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.S
 	stat := syscall.Stat_t{}
 	path, err := constor.dentrymap.getPath(input.NodeId)
 	if err != nil {
-		Debug("%s", err)
+		constor.log("%s", err)
 		return fuse.ToStatus(err)
 	}
 	pathl := Path.Join(constor.layers[0], path)
@@ -292,7 +293,7 @@ func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.S
 	}
 
 	if input.Valid&(fuse.FATTR_UID|fuse.FATTR_GID) != 0 {
-		Debug("%s %d %d", pathl, uid, gid)
+		constor.log("%s %d %d", pathl, uid, gid)
 		err = os.Lchown(pathl, uid, gid)
 		if err != nil {
 			return fuse.ToStatus(err)
@@ -331,7 +332,7 @@ func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.S
 			// FIXME: there is no Lchtimes
 			err = os.Chtimes(pathl, *atime, *mtime)
 			if err != nil {
-				Debug("%s", err)
+				constor.log("%s", err)
 				return fuse.ToStatus(err)
 			}
 		}
@@ -348,7 +349,7 @@ func (constor *Constor) SetAttr(input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.S
 }
 
 func (constor *Constor) Readlink(header *fuse.InHeader) (out []byte, code fuse.Status) {
-	Debug("%d", header.NodeId)
+	constor.log("%d", header.NodeId)
 	pathl, err := constor.getPath(header.NodeId)
 	if err != nil {
 		return []byte{}, fuse.ToStatus(err)
@@ -382,7 +383,7 @@ func (constor *Constor) Mknod(input *fuse.MknodIn, name string, out *fuse.EntryO
 }
 
 func (constor *Constor) Mkdir(input *fuse.MkdirIn, name string, out *fuse.EntryOut) (code fuse.Status) {
-	Debug("%d %s", input.NodeId, name)
+	constor.log("%d %s", input.NodeId, name)
 	path, err := constor.dentrymap.getPath(input.NodeId)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -392,7 +393,7 @@ func (constor *Constor) Mkdir(input *fuse.MkdirIn, name string, out *fuse.EntryO
 	}
 	pathl := Path.Join(constor.layers[0], path, name)
 	syscall.Unlink(pathl) // remove a deleted entry
-	Debug("mkdir(%s)", pathl)
+	constor.log("mkdir(%s)", pathl)
 	err = syscall.Mkdir(pathl, input.Mode)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -405,7 +406,7 @@ func (constor *Constor) Mkdir(input *fuse.MkdirIn, name string, out *fuse.EntryO
 }
 
 func (constor *Constor) Unlink(header *fuse.InHeader, name string) (code fuse.Status) {
-	Debug("%d %s", header.NodeId, name)
+	constor.log("%d %s", header.NodeId, name)
 	var stat syscall.Stat_t
 	parentino := header.NodeId
 	dirpath, err := constor.dentrymap.getPath(parentino)
@@ -455,7 +456,7 @@ func (constor *Constor) Unlink(header *fuse.InHeader, name string) (code fuse.St
 }
 
 func (constor *Constor) Rmdir(header *fuse.InHeader, name string) (code fuse.Status) {
-	Debug("%d %s", header.NodeId, name)
+	constor.log("%d %s", header.NodeId, name)
 	var stat syscall.Stat_t
 	parentino := header.NodeId
 	dirpath, err := constor.dentrymap.getPath(parentino)
@@ -506,13 +507,16 @@ func (constor *Constor) Rmdir(header *fuse.InHeader, name string) (code fuse.Sta
 }
 
 func (constor *Constor) Symlink(header *fuse.InHeader, pointedTo string, linkName string, out *fuse.EntryOut) (code fuse.Status) {
-	Debug("%d %s <- %s, uid: %d, gid: %d", header.NodeId, pointedTo, linkName, header.Uid, header.Gid)
+	constor.log("%d %s <- %s, uid: %d, gid: %d", header.NodeId, pointedTo, linkName, header.Uid, header.Gid)
 	parentino := header.NodeId
-	path, err := constor.dentrymap.getPathName(parentino, linkName)
+	path, err := constor.dentrymap.getPath(parentino)
 	if err != nil {
 		return fuse.ToStatus(err)
 	}
-	pathl := Path.Join(constor.layers[0], path)
+	if err = constor.createPath(path); err != nil {
+		return fuse.ToStatus(err)
+	}
+	pathl := Path.Join(constor.layers[0], path, linkName)
 	syscall.Unlink(pathl) // remove a deleted entry
 	err = syscall.Symlink(pointedTo, pathl)
 	if err != nil {
@@ -602,7 +606,7 @@ func (constor *Constor) Rename(input *fuse.RenameIn, oldName string, newName str
 }
 
 func (constor *Constor) Link(input *fuse.LinkIn, name string, out *fuse.EntryOut) (code fuse.Status) {
-	Debug("%d %d %s", input.Oldnodeid, input.NodeId, name)
+	constor.log("%d %d %s", input.Oldnodeid, input.NodeId, name)
 	oldpath, err := constor.dentrymap.getPath(input.Oldnodeid)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -651,7 +655,7 @@ func (constor *Constor) RemoveXAttr(header *fuse.InHeader, attr string) fuse.Sta
 }
 
 func (constor *Constor) Access(input *fuse.AccessIn) (code fuse.Status) {
-	Debug("%d", input.NodeId)
+	constor.log("%d", input.NodeId)
 	// FIXME: oops fix this
 	path, err := constor.getPath(input.NodeId)
 	if err != nil {
@@ -665,7 +669,7 @@ func (constor *Constor) Create(input *fuse.CreateIn, name string, out *fuse.Crea
 	if err != nil {
 		return fuse.ToStatus(err)
 	}
-	Debug("%s%s %d %d %d", dirpath, name, input.Mode, input.Uid, input.Gid)
+	constor.log("%s%s %d %d %d", dirpath, name, input.Mode, input.Uid, input.Gid)
 	if err := constor.createPath(dirpath); err != nil {
 		return fuse.ToStatus(err)
 	}
@@ -698,7 +702,7 @@ func (constor *Constor) Open(input *fuse.OpenIn, out *fuse.OpenOut) (status fuse
 	if err != nil {
 		return fuse.ToStatus(err)
 	}
-	Debug("%s %d %d %d", pathl, input.Flags, input.Uid, input.Gid)
+	constor.log("%s %d %d %d", pathl, input.Flags, input.Uid, input.Gid)
 	fd, err := syscall.Open(pathl, int(input.Flags), 0)
 	if err != nil {
 		return fuse.ToStatus(err)
@@ -714,7 +718,7 @@ func (constor *Constor) Open(input *fuse.OpenIn, out *fuse.OpenOut) (status fuse
 }
 
 func (constor *Constor) Read(input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
-	Debug("%d", input.Fh)
+	constor.log("%d", input.Fh)
 	ptr := uintptr(input.Fh)
 	inode, err := constor.inodemap.findInode(input.NodeId)
 	if err != nil {
@@ -744,7 +748,10 @@ func (constor *Constor) Read(input *fuse.ReadIn, buf []byte) (fuse.ReadResult, f
 
 	fd := F.fd
 	_, err = syscall.Pread(fd, buf, int64(offset))
-	return nil, fuse.ToStatus(err)
+	if err != nil {
+		return nil, fuse.ToStatus(err)
+	}
+	return fuse.ReadResultData(buf), fuse.OK
 }
 
 func (constor *Constor) Release(input *fuse.ReleaseIn) {
@@ -759,7 +766,7 @@ func (constor *Constor) Release(input *fuse.ReleaseIn) {
 }
 
 func (constor *Constor) Write(input *fuse.WriteIn, data []byte) (written uint32, code fuse.Status) {
-	Debug("%d", input.Fh)
+	constor.log("%d", input.Fh)
 	ptr := uintptr(input.Fh)
 	offset := input.Offset
 
@@ -796,18 +803,18 @@ func (constor *Constor) Write(input *fuse.WriteIn, data []byte) (written uint32,
 }
 
 func (constor *Constor) Flush(input *fuse.FlushIn) fuse.Status {
-	Debug("")
+	constor.log("")
 	return fuse.OK
 }
 
 func (constor *Constor) Fsync(input *fuse.FsyncIn) (code fuse.Status) {
-	Debug("")
+	constor.log("")
 	return fuse.OK
 }
 
 func (constor *Constor) ReadDirPlus(input *fuse.ReadIn, fuseout *fuse.DirEntryList) fuse.Status {
-	Debug("")
-	Debug("%d", input.Offset)
+	constor.log("")
+	constor.log("%d", input.Offset)
 	ptr := uintptr(input.Fh)
 	offset := input.Offset
 	entryOut := fuse.EntryOut{}
@@ -848,7 +855,7 @@ func (constor *Constor) Fallocate(in *fuse.FallocateIn) (code fuse.Status) {
 }
 
 func main() {
-	// godaemon.MakeDaemon(&godaemon.DaemonAttr{})
+	godaemon.MakeDaemon(&godaemon.DaemonAttr{})
 	log.SetFlags(log.Lshortfile)
 
 	if len(os.Args) == 1 {
@@ -859,10 +866,13 @@ func main() {
 	layers := os.Args[1]
 	mountPoint := os.Args[2]
 
-	// log := strings.Split(mountPoint, "/")
-	// pid := os.Getpid()
-	// pidstr := strconv.Itoa(pid)
-	// logfd, err := syscall.Open("/tmp/constor.log." + pidstr + "." + log[len(log)-1], syscall.O_RDWR|syscall.O_CREAT, 0)
+	log := strings.Split(mountPoint, "/")
+	pid := os.Getpid()
+	pidstr := strconv.Itoa(pid)
+	logf, err := os.Create("/tmp/constor.log." + pidstr + "." + log[len(log)-1])
+	logfd := logf.Fd()
+	syscall.Dup2(int(logfd), 1)
+	syscall.Dup2(int(logfd), 2)
 
 	constor := new(Constor)
 	constor.inodemap = NewInodemap(constor)
@@ -877,12 +887,12 @@ func main() {
 		Options: []string{"nonempty", "allow_other", "default_permissions", "user_id=0", "group_id=0", "fsname=" + constor.layers[0]},
 	}
 	_ = syscall.Umask(000)
-
+	constor.logf = logf
 	state, err := fuse.NewServer(constor, mountPoint, mOpts)
 	if err != nil {
-		fmt.Printf("Mount fail: %v\n", err)
+		// fmt.Printf("Mount fail: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Mounted!")
+	// fmt.Println("Mounted!")
 	state.Serve()
 }

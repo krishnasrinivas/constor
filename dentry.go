@@ -77,7 +77,6 @@ func (dentrymap *Dentrymap) dentryChangeparent(ino uint64, oldParent uint64, new
 		return syscall.ENOENT
 	}
 	for _, d := range m {
-		Debug("%d %d %d %s %s", ino, oldParent, newParent, oldName, newName)
 		if d.parentino == oldParent && d.name == oldName {
 			d.parentino = newParent
 			d.name = newName

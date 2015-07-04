@@ -12,21 +12,21 @@ import (
 	"syscall"
 )
 
-func Debug(format string, a ...interface{}) {
-	return
-	pc, file, line, _ := runtime.Caller(1)
-	info := fmt.Sprintf(format, a...)
-	funcName := runtime.FuncForPC(pc).Name()
-	fmt.Printf("%s:%d:%s %v\n", Path.Base(file), line, funcName, info)
-}
-
 type Constor struct {
 	sync.Mutex
 	rootfs    string
+	logf	  *os.File
 	inodemap  *Inodemap
 	dentrymap *Dentrymap
 	fdmap     map[uintptr]*FD
 	layers    []string
+}
+
+func (constor *Constor) log(format string, a ...interface{}) {
+	pc, file, line, _ := runtime.Caller(1)
+	info := fmt.Sprintf(format, a...)
+	funcName := runtime.FuncForPC(pc).Name()
+	fmt.Fprintf(constor.logf, "%s:%d:%s %v\n", Path.Base(file), line, funcName, info)
 }
 
 func (constor *Constor) getLayer(path string) int {
@@ -80,7 +80,6 @@ func (constor *Constor) LstatInode(path string, stat *syscall.Stat_t, inode *Ino
 		inode.layer = li
 	}
 	pathl := Path.Join(constor.layers[li], path)
-	Debug("%s", pathl)
 	err := syscall.Lstat(pathl, stat)
 	if err != nil {
 		return err
@@ -141,7 +140,6 @@ func (constor *Constor) Lstat(path string, stat *syscall.Stat_t) error {
 }
 
 func (constor *Constor) createPath(dirpath string) error {
-	Debug("%s", dirpath)
 	dirs := strings.Split(dirpath, "/")
 	if len(dirs) == 0 {
 		return syscall.EIO
