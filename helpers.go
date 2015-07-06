@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 )
 
 type Constor struct {
@@ -27,6 +28,64 @@ func (constor *Constor) log(format string, a ...interface{}) {
 	info := fmt.Sprintf(format, a...)
 	funcName := runtime.FuncForPC(pc).Name()
 	fmt.Fprintf(constor.logf, "%s:%d:%s %v\n", Path.Base(file), line, funcName, info)
+}
+
+func (constor *Constor) error(format string, a ...interface{}) {
+	pc, file, line, _ := runtime.Caller(1)
+	info := fmt.Sprintf(format, a...)
+	funcName := runtime.FuncForPC(pc).Name()
+	fmt.Fprintf(constor.logf, "ERR %s:%d:%s %v\n", Path.Base(file), line, funcName, info)
+}
+
+func Lgetxattr(path string, attr string) ([]byte, error) {
+	pathBytes, err := syscall.BytePtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	attrBytes, err := syscall.BytePtrFromString(attr)
+	if err != nil {
+		return nil, err
+	}
+	dest := make([]byte, 128)
+	destBytes := unsafe.Pointer(&dest[0])
+	sz, _, errno := syscall.Syscall6(syscall.SYS_LGETXATTR, uintptr(unsafe.Pointer(pathBytes)), uintptr(unsafe.Pointer(attrBytes)), uintptr(destBytes), uintptr(len(dest)), 0, 0)
+	if errno == syscall.ENODATA {
+		return nil, nil
+	}
+	if errno == syscall.ERANGE {
+		dest = make([]byte, sz)
+		destBytes := unsafe.Pointer(&dest[0])
+		sz, _, errno = syscall.Syscall6(syscall.SYS_LGETXATTR, uintptr(unsafe.Pointer(pathBytes)), uintptr(unsafe.Pointer(attrBytes)), uintptr(destBytes), uintptr(len(dest)), 0, 0)
+	}
+	if errno != 0 {
+		return nil, errno
+	}
+
+	return dest[:sz], nil
+}
+
+var _zero uintptr
+
+func Lsetxattr(path string, attr string, data []byte, flags int) error {
+	pathBytes, err := syscall.BytePtrFromString(path)
+	if err != nil {
+		return err
+	}
+	attrBytes, err := syscall.BytePtrFromString(attr)
+	if err != nil {
+		return err
+	}
+	var dataBytes unsafe.Pointer
+	if len(data) > 0 {
+		dataBytes = unsafe.Pointer(&data[0])
+	} else {
+		dataBytes = unsafe.Pointer(&_zero)
+	}
+	_, _, errno := syscall.Syscall6(syscall.SYS_LSETXATTR, uintptr(unsafe.Pointer(pathBytes)), uintptr(unsafe.Pointer(attrBytes)), uintptr(dataBytes), uintptr(len(data)), uintptr(flags), 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 func (constor *Constor) getLayer(path string) int {
@@ -88,13 +147,17 @@ func (constor *Constor) LstatInode(path string, stat *syscall.Stat_t, inode *Ino
 		// INOXATTR valid only for layer-0
 		return nil
 	}
-	var inobyte []byte
-	inobyte = make([]byte, 100, 100)
-	size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
+	// var inobyte []byte
+	// inobyte = make([]byte, 100, 100)
+	// size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
+	inobyte, err := Lgetxattr(pathl, INOXATTR)
 	if err != nil {
 		return nil
 	}
-	inostr := string(inobyte[:size])
+	if len(inobyte) == 0 {
+		return nil
+	}
+	inostr := string(inobyte)
 	ino, err := strconv.Atoi(inostr)
 	if err != nil {
 		return err
@@ -112,6 +175,7 @@ func (constor *Constor) Lstat(path string, stat *syscall.Stat_t) error {
 		return syscall.ENOENT
 	}
 	pathl := Path.Join(constor.layers[li], path)
+	constor.log("%s", pathl)
 	err := syscall.Lstat(pathl, stat)
 	if err != nil {
 		return err
@@ -121,13 +185,17 @@ func (constor *Constor) Lstat(path string, stat *syscall.Stat_t) error {
 		return nil
 	}
 
-	var inobyte []byte
-	inobyte = make([]byte, 100, 100)
-	size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
+	// var inobyte []byte
+	// inobyte = make([]byte, 100, 100)
+	// size, err := syscall.Getxattr(pathl, INOXATTR, inobyte)
+	inobyte, err := Lgetxattr(pathl, INOXATTR)
 	if err != nil {
 		return nil
 	}
-	inostr := string(inobyte[:size])
+	if len(inobyte) == 0 {
+		return nil
+	}
+	inostr := string(inobyte)
 	ino, err := strconv.Atoi(inostr)
 	if err != nil {
 		return err
@@ -219,6 +287,10 @@ func (constor *Constor) copyup(inode *Inode) error {
 	if err != nil {
 		return err
 	}
+	err = constor.createPath(Path.Dir(dst))
+	if err != nil {
+		return err
+	}
 	dst = Path.Join(constor.layers[0], dst)
 	fi, err := os.Lstat(src)
 	if err != nil {
@@ -267,17 +339,24 @@ func (constor *Constor) copyup(inode *Inode) error {
 			return err
 		}
 	}
-	if err = syscall.Chown(dst, int(stat.Uid), int(stat.Gid)); err != nil {
+	if err = syscall.Lchown(dst, int(stat.Uid), int(stat.Gid)); err != nil {
 		return err
 	}
-	if err = syscall.UtimesNano(dst, []syscall.Timespec{stat.Atim, stat.Mtim}); err != nil {
-		return err
+	if fi.Mode()&os.ModeSymlink != os.ModeSymlink {
+		if err = syscall.UtimesNano(dst, []syscall.Timespec{stat.Atim, stat.Mtim}); err != nil {
+			return err
+		}
 	}
 	inoitoa := strconv.Itoa(int(stat.Ino))
 	inobyte := []byte(inoitoa)
-	if err = syscall.Setxattr(dst, INOXATTR, inobyte, 0); err != nil {
+	// if err = syscall.Setxattr(dst, INOXATTR, inobyte, 0); err != nil {
+	// 	return err
+	// }
+	if err = Lsetxattr(dst, INOXATTR, inobyte, 0); err != nil {
 		return err
 	}
 	inode.layer = 0
+	path, err := constor.dentrymap.getPath(inode.ino)
+	constor.log("ino %d file %s", inode.ino, path)
 	return nil
 }
